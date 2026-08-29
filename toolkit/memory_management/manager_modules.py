@@ -7,6 +7,7 @@ I simply modified it to work with a memory management model and with AI Toolkit'
 """
 
 import os
+import time
 
 import torch
 import torch.nn as nn
@@ -25,6 +26,30 @@ _DEVICE_STATE = {}
 # enqueue several layers ahead so the H2D stream stays saturated instead of
 # stalling on a per-layer sync. Override with AI_TOOLKIT_OFFLOAD_DEPTH.
 PIPELINE_DEPTH = int(os.environ.get("AI_TOOLKIT_OFFLOAD_DEPTH", "4"))
+
+
+def _probe_ring_marker(label: str, device: torch.device, **fields) -> None:
+    """Emit ring-slot telemetry only for an explicitly instrumented probe."""
+    if os.environ.get("AI_TOOLKIT_RING_MEMORY_LOG") != "1":
+        return
+    mem_available_kib = -1
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    mem_available_kib = int(line.split()[1])
+                    break
+    except OSError:
+        pass
+    cuda_allocated = torch.cuda.memory_allocated(device) if device.type == "cuda" else 0
+    cuda_reserved = torch.cuda.memory_reserved(device) if device.type == "cuda" else 0
+    details = " ".join(f"{key}={value}" for key, value in sorted(fields.items()))
+    print(
+        f"AI_TOOLKIT_RING_MEMORY epoch_s={time.time():.6f} label={label} "
+        f"mem_available_kib={mem_available_kib} cuda_allocated={cuda_allocated} "
+        f"cuda_reserved={cuda_reserved} {details}".rstrip(),
+        flush=True,
+    )
 
 
 def _get_device_state(device: torch.device):
@@ -227,7 +252,9 @@ def _pin_inner_tensors(t: torch.Tensor) -> None:
                 pass
 
 
-def _ensure_cpu_pinned(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+def _ensure_cpu_pinned(
+    t: Optional[torch.Tensor], pin_memory: bool = True
+) -> Optional[torch.Tensor]:
     if t is None:
         return None
     if t.device.type != "cpu":
@@ -235,6 +262,8 @@ def _ensure_cpu_pinned(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
             t = t.to("cpu", copy=True)
         except Exception:
             t = t.to("cpu")
+    if not pin_memory:
+        return t
     # Quantized wrappers can't be pin_memory()'d directly, but pinning their
     # inner storage gives the same async-transfer benefit.
     if _is_quantized_tensor(t):
@@ -249,14 +278,14 @@ def _ensure_cpu_pinned(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     return t
 
 
-def _move_params_to_cpu_and_pin(module: nn.Module):
-    """Force parameters to CPU (+pinned) so we can 'bounce' them per forward/backward."""
+def _move_params_to_cpu_and_pin(module: nn.Module, pin_memory: bool = True):
+    """Force parameters to CPU and optionally pin them for layer bouncing."""
     with torch.no_grad():
         for name in ("weight", "bias"):
             param = getattr(module, name, None)
             if not isinstance(param, nn.Parameter):
                 continue
-            cpu_data = _ensure_cpu_pinned(param.data).detach()
+            cpu_data = _ensure_cpu_pinned(param.data, pin_memory).detach()
             if _is_quantized_tensor(param.data):
                 # Tensor-subclass weights (e.g. torchao float8 AffineQuantizedTensor)
                 # ignore `param.data = ...`: the wrapper reports CPU but its inner
@@ -640,7 +669,7 @@ class LinearLayerMemoryManager(BaseLayerMemoryManager):
         super().__init__(module, manager)
 
         # 1) Move params to CPU + pin memory for fast H2D
-        _move_params_to_cpu_and_pin(self.module)
+        _move_params_to_cpu_and_pin(self.module, self.manager.pin_memory)
 
         # 2) Hijack forward
         if hasattr(self.module, "ara_lora_ref"):
@@ -697,7 +726,7 @@ class OstrisLinearLayerMemoryManager(BaseLayerMemoryManager):
                     continue
                 if buf.device.type != "cpu":
                     buf = buf.to("cpu")
-                if torch.cuda.is_available() and not buf.is_pinned():
+                if self.manager.pin_memory and torch.cuda.is_available() and not buf.is_pinned():
                     try:
                         buf = buf.pin_memory()
                     except RuntimeError:
@@ -705,7 +734,9 @@ class OstrisLinearLayerMemoryManager(BaseLayerMemoryManager):
                 module._buffers[name] = buf
             bias = module._parameters.get("bias", None)
             if bias is not None:
-                bias.data = _ensure_cpu_pinned(bias.data).detach()
+                bias.data = _ensure_cpu_pinned(
+                    bias.data, self.manager.pin_memory
+                ).detach()
 
         # 2) Hijack forward
         if hasattr(self.module, "ara_lora_ref"):
@@ -744,6 +775,10 @@ class OstrisLinearLayerMemoryManager(BaseLayerMemoryManager):
             idx = state["forward_clk"]
             state["forward_clk"] = (idx + 1) % d
             ts = state["transfer_stream"]
+            _probe_ring_marker(
+                "ring_slot_allocate_start", device, slot=idx, depth=d,
+                module_id=id(module), buffer_count=len(cpu_bufs)
+            )
             # the guard makes current_stream() resolve to the process device and
             # keeps that device's context active for the quantizer's triton
             # kernels (nothing sets the global current device, so it is 0 even
@@ -762,6 +797,10 @@ class OstrisLinearLayerMemoryManager(BaseLayerMemoryManager):
                     state["w_buffers"][idx] = gpu_bufs
                     state["b_buffers"][idx] = gpu_bias
                     state["fwd_slot_ready"][idx].record()
+                _probe_ring_marker(
+                    "ring_slot_ready", device, slot=idx, depth=d,
+                    module_id=id(module), buffer_count=len(gpu_bufs)
+                )
                 compute_stream = torch.cuda.current_stream()
                 compute_stream.wait_event(state["fwd_slot_ready"][idx])
 
@@ -775,6 +814,16 @@ class OstrisLinearLayerMemoryManager(BaseLayerMemoryManager):
                     tensor.record_stream(compute_stream)
                 if gpu_bias is not None:
                     gpu_bias.record_stream(compute_stream)
+                cpu_backward_buffers = None
+                if (
+                    self.manager.convrot_backward_save_on_cpu
+                    and "cr8_qdata" in cpu_bufs
+                    and "cr8_scales" in cpu_bufs
+                ):
+                    cpu_backward_buffers = (
+                        cpu_bufs["cr8_qdata"],
+                        cpu_bufs["cr8_scales"],
+                    )
 
                 # swap the quantized state onto the device, run the quantizer's own
                 # forward, then swap the pinned CPU state back
@@ -783,13 +832,21 @@ class OstrisLinearLayerMemoryManager(BaseLayerMemoryManager):
                 if gpu_bias is not None:
                     bias.data = gpu_bias
                 try:
+                    if cpu_backward_buffers is not None:
+                        module._convrot_backward_cpu_buffers = cpu_backward_buffers
                     out = self._original_forward(x)
                 finally:
+                    if hasattr(module, "_convrot_backward_cpu_buffers"):
+                        del module._convrot_backward_cpu_buffers
                     for n, t in cpu_bufs.items():
                         module._buffers[n] = t
                     if bias_cpu is not None:
                         bias.data = bias_cpu
                 _release_forward_slot(state, idx)
+                _probe_ring_marker(
+                    "ring_slot_release", device, slot=idx, depth=d,
+                    module_id=id(module), buffer_count=len(gpu_bufs)
+                )
             return out
 
         if hasattr(self.module, "ara_lora_ref"):
@@ -809,7 +866,7 @@ class ConvLayerMemoryManager(BaseLayerMemoryManager):
         super().__init__(module, manager)
 
         # 1) Move params to CPU + pin memory for fast H2D
-        _move_params_to_cpu_and_pin(self.module)
+        _move_params_to_cpu_and_pin(self.module, self.manager.pin_memory)
 
         # Cache static conv attributes from the module
         stride = (

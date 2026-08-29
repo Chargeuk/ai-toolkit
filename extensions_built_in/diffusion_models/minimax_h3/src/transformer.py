@@ -27,7 +27,10 @@ and both heads predict the data-ward velocity ``clean - noise``.
 """
 
 import math
+import os
+import time
 from dataclasses import dataclass
+from contextlib import nullcontext
 from typing import Optional, Tuple
 
 import torch
@@ -36,6 +39,30 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 MODALITY_NUM = 3  # 0 = video, 1 = text, 2 = audio; -1 marks padding rows
+
+
+def _probe_memory_marker(label: str, **fields) -> None:
+    """Emit low-overhead block telemetry only for an explicit memory probe."""
+    if os.environ.get("AI_TOOLKIT_BLOCK_MEMORY_LOG") != "1":
+        return
+    mem_available_kib = -1
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    mem_available_kib = int(line.split()[1])
+                    break
+    except OSError:
+        pass
+    cuda_allocated = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
+    cuda_reserved = torch.cuda.memory_reserved() if torch.cuda.is_available() else 0
+    details = " ".join(f"{key}={value}" for key, value in sorted(fields.items()))
+    print(
+        f"AI_TOOLKIT_BLOCK_MEMORY epoch_s={time.time():.6f} label={label} "
+        f"mem_available_kib={mem_available_kib} cuda_allocated={cuda_allocated} "
+        f"cuda_reserved={cuda_reserved} {details}".rstrip(),
+        flush=True,
+    )
 
 
 @dataclass
@@ -390,6 +417,8 @@ class MiniMaxH3Transformer(nn.Module):
         self.final_layer = MiniMaxH3FinalLayer(p)
 
         self.gradient_checkpointing = False
+        self.activation_checkpoint_group_size = 1
+        self.activation_checkpoint_save_on_cpu = False
 
     # float32 islands of the shipped checkpoint; used by the loader to keep
     # these keys at full precision when the rest is cast to bf16
@@ -431,6 +460,29 @@ class MiniMaxH3Transformer(nn.Module):
         hi = (lo + 1).clamp(max=table.shape[0] - 1)
         frac = (pos - lo.float()).unsqueeze(1)
         return (table[lo] * (1.0 - frac) + table[hi] * frac).to(t.device)
+
+    def _run_block_group(
+        self,
+        start: int,
+        end: int,
+        x: torch.Tensor,
+        temb: torch.Tensor,
+        adaln_indices: torch.Tensor,
+        rotary_emb,
+        attn_mask,
+    ) -> torch.Tensor:
+        """Run a contiguous block group for optional grouped checkpointing."""
+        for index in range(start, end):
+            _probe_memory_marker(
+                "transformer_block_start", block=index, group_start=start, group_end=end
+            )
+            x = self.blocks[index](
+                x, temb, adaln_indices, rotary_emb, attn_mask
+            )
+            _probe_memory_marker(
+                "transformer_block_end", block=index, group_start=start, group_end=end
+            )
+        return x
 
     def forward(
         self,
@@ -484,19 +536,87 @@ class MiniMaxH3Transformer(nn.Module):
         temb = self._time_embedding(unique_t)
         adaln_indices = inverse * MODALITY_NUM + token_tags.clamp(min=0)
 
-        for block in self.blocks:
-            if torch.is_grad_enabled() and self.gradient_checkpointing:
-                x = checkpoint(
-                    block,
-                    x,
-                    temb,
-                    adaln_indices,
-                    rotary_emb,
-                    attn_mask,
-                    use_reentrant=False,
+        group_size = self.activation_checkpoint_group_size
+        if torch.is_grad_enabled() and self.gradient_checkpointing and group_size > 1:
+            for start in range(0, len(self.blocks), group_size):
+                end = min(start + group_size, len(self.blocks))
+                saved_tensor_context = (
+                    torch.autograd.graph.save_on_cpu(pin_memory=False)
+                    if self.activation_checkpoint_save_on_cpu
+                    else nullcontext()
                 )
-            else:
-                x = block(x, temb, adaln_indices, rotary_emb, attn_mask)
+                with saved_tensor_context:
+                    if self.activation_checkpoint_save_on_cpu:
+                        # Only the changing block boundary belongs in the
+                        # checkpoint input set.  The other tensors are shared
+                        # invariants for every group; explicitly passing them
+                        # causes save_on_cpu to make redundant copies at each
+                        # boundary on unified-memory systems.
+                        x = checkpoint(
+                            lambda block_x, start=start, end=end: self._run_block_group(
+                                start,
+                                end,
+                                block_x,
+                                temb,
+                                adaln_indices,
+                                rotary_emb,
+                                attn_mask,
+                            ),
+                            x,
+                            use_reentrant=False,
+                        )
+                    else:
+                        x = checkpoint(
+                            lambda block_x, block_temb, block_indices, block_rope, block_mask,
+                            start=start, end=end: self._run_block_group(
+                                start,
+                                end,
+                                block_x,
+                                block_temb,
+                                block_indices,
+                                block_rope,
+                                block_mask,
+                            ),
+                            x,
+                            temb,
+                            adaln_indices,
+                            rotary_emb,
+                            attn_mask,
+                            use_reentrant=False,
+                        )
+        else:
+            for block in self.blocks:
+                if torch.is_grad_enabled() and self.gradient_checkpointing:
+                    saved_tensor_context = (
+                        torch.autograd.graph.save_on_cpu(pin_memory=False)
+                        if self.activation_checkpoint_save_on_cpu
+                        else nullcontext()
+                    )
+                    with saved_tensor_context:
+                        if self.activation_checkpoint_save_on_cpu:
+                            x = checkpoint(
+                                lambda block_x, block=block: block(
+                                    block_x,
+                                    temb,
+                                    adaln_indices,
+                                    rotary_emb,
+                                    attn_mask,
+                                ),
+                                x,
+                                use_reentrant=False,
+                            )
+                        else:
+                            x = checkpoint(
+                                block,
+                                x,
+                                temb,
+                                adaln_indices,
+                                rotary_emb,
+                                attn_mask,
+                                use_reentrant=False,
+                            )
+                else:
+                    x = block(x, temb, adaln_indices, rotary_emb, attn_mask)
 
         video_all, audio_all = self.final_layer(x, temb, inverse)
         video_out = video_all.index_select(1, video_indices)

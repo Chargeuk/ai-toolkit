@@ -588,6 +588,13 @@ class TrainConfig:
         
         # contrastive loss
         self.do_guidance_loss = kwargs.get('do_guidance_loss', False)
+        # Some unified-memory CUDA systems retain a large allocator cache
+        # between the loss forward and activation-checkpoint recomputation.
+        # Historical behavior remains the default; this is an opt-in release
+        # of unused cached blocks immediately before backward.
+        self.empty_cuda_cache_before_backward = bool(
+            kwargs.get('empty_cuda_cache_before_backward', False)
+        )
         self.guidance_loss_target: Union[int, List[int, int]] = kwargs.get('guidance_loss_target', 3.0)
         self.do_guidance_loss_cfg_zero: bool = kwargs.get('do_guidance_loss_cfg_zero', False)
         # 'constant' uses guidance_loss_target as is. 'sigma' decays the target
@@ -729,6 +736,31 @@ class ModelConfig:
         # 0 is off and 1.0 is 100% of the layers
         self.layer_offloading_transformer_percent = kwargs.get("layer_offloading_transformer_percent", 1.0)
         self.layer_offloading_text_encoder_percent = kwargs.get("layer_offloading_text_encoder_percent", 1.0)
+        # Pinned host buffers maximize asynchronous transfer speed, but some
+        # unified-memory systems have a tighter host-registration/IOVA budget.
+        # Keep historical pinning by default; pageable offload is opt-in.
+        self.layer_offloading_pin_memory = bool(kwargs.get("layer_offloading_pin_memory", True))
+        # Keep ConvRot's historical GPU saved-tensor backward path by default.
+        # Unified-memory runs may opt in to saving canonical pageable CPU
+        # qdata/scales and staging only the current layer during backward.
+        self.convrot_backward_save_on_cpu = bool(
+            kwargs.get("convrot_backward_save_on_cpu", False)
+        )
+        self.convrot_backward_save_expected_layers = int(
+            kwargs.get("convrot_backward_save_expected_layers", 0)
+        )
+        # MiniMax-H3 defaults to the historical one-block-per-checkpoint path.
+        # Values >1 are an opt-in activation-memory optimization and must be
+        # proven per model/workload before production use.
+        self.activation_checkpoint_group_size = int(kwargs.get("activation_checkpoint_group_size", 1))
+        if self.activation_checkpoint_group_size < 1:
+            raise ValueError("activation_checkpoint_group_size must be >= 1")
+        # Keep checkpoint inputs on their historical device by default.  An
+        # opt-in MiniMax-H3 path can save them in pageable CPU memory to reduce
+        # CUDA/IOVA residency on unified-memory systems.
+        self.activation_checkpoint_save_on_cpu = bool(
+            kwargs.get("activation_checkpoint_save_on_cpu", False)
+        )
 
         # can be used to load the extras like text encoder or vae from here
         # only setup for some models but will prevent having to download the te for

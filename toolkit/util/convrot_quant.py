@@ -1037,6 +1037,91 @@ _int8_linear_ste_op.register_autograd(
 )
 
 
+# Optional layer-offload training path. The forward is deliberately identical
+# to _int8_linear_ste_op and consumes only resident GPU qdata/scales. Autograd
+# retains canonical pageable CPU buffers and stages one layer for backward.
+_convrot_cpu_backward_save_probe = None
+
+
+@torch.library.custom_op(
+    "ostris::convrot_int8_linear_ste_cpu_saved", mutates_args=()
+)
+def _int8_linear_ste_cpu_saved_op(
+    x2d: torch.Tensor,
+    qdata: torch.Tensor,
+    w_scales_u8: torch.Tensor,
+    qdata_cpu: torch.Tensor,
+    w_scales_u8_cpu: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    act_qmax: int,
+    out_dtype: str,
+) -> torch.Tensor:
+    m = x2d.shape[0]
+    aq, a_s = _int8_act_quant_padded(x2d, act_qmax)
+    i32 = torch._int_mm(aq, qdata.t())
+    return _int8_epilogue(
+        i32[:m],
+        a_s[:m],
+        w_scales_u8.view(torch.float32),
+        bias,
+        getattr(torch, out_dtype),
+    )
+
+
+@_int8_linear_ste_cpu_saved_op.register_fake
+def _int8_linear_ste_cpu_saved_fake(
+    x2d, qdata, w_scales_u8, qdata_cpu, w_scales_u8_cpu, bias, act_qmax, out_dtype
+):
+    return torch.empty(
+        x2d.shape[0],
+        qdata.shape[0],
+        device=x2d.device,
+        dtype=getattr(torch, out_dtype),
+    )
+
+
+def _int8_linear_ste_cpu_saved_setup(ctx, inputs, output):
+    (
+        _x2d,
+        _qdata,
+        _w_scales_u8,
+        qdata_cpu,
+        w_scales_u8_cpu,
+        _bias,
+        _act_qmax,
+        _out_dtype,
+    ) = inputs
+    probe = _convrot_cpu_backward_save_probe
+    if probe is not None:
+        probe(
+            {
+                "qdata_device": str(qdata_cpu.device),
+                "scales_device": str(w_scales_u8_cpu.device),
+                "qdata_ptr": qdata_cpu.data_ptr(),
+                "scales_ptr": w_scales_u8_cpu.data_ptr(),
+            }
+        )
+    ctx.save_for_backward(qdata_cpu, w_scales_u8_cpu)
+
+
+def _int8_linear_ste_cpu_saved_backward(ctx, grad):
+    qdata_cpu, w_scales_u8_cpu = ctx.saved_tensors
+    qdata = qdata_cpu.to(grad.device, non_blocking=False)
+    weight = qdata.to(grad.dtype)
+    del qdata
+    scales = w_scales_u8_cpu.view(torch.float32).to(
+        device=grad.device, dtype=grad.dtype
+    )
+    weight.mul_(scales.unsqueeze(1))
+    return grad @ weight, None, None, None, None, None, None, None
+
+
+_int8_linear_ste_cpu_saved_op.register_autograd(
+    _int8_linear_ste_cpu_saved_backward,
+    setup_context=_int8_linear_ste_cpu_saved_setup,
+)
+
+
 def _int8_epilogue(
     i32: torch.Tensor,
     a_scales: torch.Tensor,
@@ -1348,6 +1433,19 @@ class ConvRotInt8Quantizer(OstrisQuantizer):
     def _linear_ste(self, module, x2d: torch.Tensor, out_dtype: str) -> torch.Tensor:
         """Hardware STE linear for the training path. For int8 the saved qdata is
         the resident buffer itself, so autograd holds only a free reference."""
+        cpu_backward_buffers = getattr(module, "_convrot_backward_cpu_buffers", None)
+        if cpu_backward_buffers is not None:
+            qdata_cpu, scales_cpu = cpu_backward_buffers
+            return _int8_linear_ste_cpu_saved_op(
+                x2d,
+                self._qdata(module),
+                self._scales_u8(module),
+                qdata_cpu,
+                scales_cpu,
+                module.bias,
+                self.act_qmax,
+                out_dtype,
+            )
         return _int8_linear_ste_op(
             x2d,
             self._qdata(module),

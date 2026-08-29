@@ -591,6 +591,12 @@ class MinimaxH3Model(BaseModel):
         self.print_and_status_update("Loading MiniMax-H3 model")
 
         transformer = self._load_transformer()
+        transformer.activation_checkpoint_group_size = (
+            self.model_config.activation_checkpoint_group_size
+        )
+        transformer.activation_checkpoint_save_on_cpu = (
+            self.model_config.activation_checkpoint_save_on_cpu
+        )
 
         # load assistant lora if specified (merged into the quantized weights)
         if self.model_config.assistant_lora_path is not None:
@@ -605,11 +611,22 @@ class MinimaxH3Model(BaseModel):
             self.model_config.layer_offloading
             and self.model_config.layer_offloading_transformer_percent > 0
         ):
+            self.print_and_status_update(
+                "Attaching transformer layer offload "
+                f"(percent={self.model_config.layer_offloading_transformer_percent}, "
+                f"pin_memory={self.model_config.layer_offloading_pin_memory})"
+            )
             MemoryManager.attach(
                 transformer,
                 self.device_torch,
                 offload_percent=self.model_config.layer_offloading_transformer_percent,
+                pin_memory=self.model_config.layer_offloading_pin_memory,
+                convrot_backward_save_on_cpu=self.model_config.convrot_backward_save_on_cpu,
+                convrot_backward_save_expected_layers=(
+                    self.model_config.convrot_backward_save_expected_layers
+                ),
             )
+            self.print_and_status_update("Transformer layer offload attached")
 
         if self.model_config.low_vram:
             self.print_and_status_update("Keeping transformer on CPU")
@@ -639,6 +656,7 @@ class MinimaxH3Model(BaseModel):
                 text_encoder,
                 self.device_torch,
                 offload_percent=self.model_config.layer_offloading_text_encoder_percent,
+                pin_memory=self.model_config.layer_offloading_pin_memory,
             )
         if self.model_config.low_vram:
             text_encoder.to("cpu")

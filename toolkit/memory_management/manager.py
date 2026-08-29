@@ -48,9 +48,17 @@ class MemoryManager:
         self,
         module: torch.nn.Module,
         process_device: torch.device = torch.device("cpu"),
+        pin_memory: bool = True,
+        convrot_backward_save_on_cpu: bool = False,
+        convrot_backward_save_expected_layers: int = 0,
     ):
         self.module: torch.nn.Module = module
         self.process_device: torch.device = process_device
+        self.pin_memory: bool = pin_memory
+        self.convrot_backward_save_on_cpu: bool = convrot_backward_save_on_cpu
+        self.convrot_backward_save_expected_layers: int = (
+            convrot_backward_save_expected_layers
+        )
         self.unmanaged_modules: list[torch.nn.Module] = []
 
     def memory_managed_to(self, *args, **kwargs):
@@ -80,13 +88,61 @@ class MemoryManager:
         module: torch.nn.Module,
         device: torch.device,
         offload_percent: float = 1.0,
-        ignore_modules: list[torch.nn.Module] = []
+        ignore_modules: list[torch.nn.Module] = [],
+        pin_memory: bool = True,
+        convrot_backward_save_on_cpu: bool = False,
+        convrot_backward_save_expected_layers: int = 0,
     ):
         if hasattr(module, "_memory_manager"):
             # already attached
             return
 
-        module._memory_manager = cls(module, device)
+        if convrot_backward_save_on_cpu:
+            if offload_percent != 1.0:
+                raise ValueError(
+                    "convrot_backward_save_on_cpu requires offload_percent=1.0"
+                )
+            if convrot_backward_save_expected_layers <= 0:
+                raise ValueError(
+                    "convrot_backward_save_on_cpu requires a positive "
+                    "convrot_backward_save_expected_layers fail-closed binding"
+                )
+            seen = set()
+            eligible = []
+            incompatible = []
+            for name, child in module.named_modules():
+                if id(child) in seen or not getattr(child, "is_ostris_quantized", False):
+                    continue
+                seen.add(id(child))
+                if "cr8_qdata" in child._buffers and "cr8_scales" in child._buffers:
+                    eligible.append(name)
+                else:
+                    incompatible.append(name)
+            if incompatible:
+                raise RuntimeError(
+                    "convrot_backward_save_on_cpu found incompatible quantized "
+                    f"layers without ConvRot8 CPU buffers: {incompatible[:8]}"
+                )
+            if len(eligible) != convrot_backward_save_expected_layers:
+                raise RuntimeError(
+                    "convrot_backward_save_on_cpu eligibility mismatch: "
+                    f"expected={convrot_backward_save_expected_layers} "
+                    f"eligible={len(eligible)}"
+                )
+            print(
+                "ConvRot CPU-backward eligibility PASS: "
+                f"bound={len(eligible)} expected={convrot_backward_save_expected_layers}"
+            )
+
+        module._memory_manager = cls(
+            module,
+            device,
+            pin_memory=pin_memory,
+            convrot_backward_save_on_cpu=convrot_backward_save_on_cpu,
+            convrot_backward_save_expected_layers=(
+                convrot_backward_save_expected_layers
+            ),
+        )
 
         # override the to method to handle memory management
         module._mm_to = module.to
@@ -130,6 +186,7 @@ class MemoryManager:
                                 MemoryManager.attach(
                                     ara,
                                     device,
+                                    pin_memory=pin_memory,
                                 )
                     modules_processed.append(child_module)
                 elif (
@@ -155,6 +212,7 @@ class MemoryManager:
                                 MemoryManager.attach(
                                     ara,
                                     device,
+                                    pin_memory=pin_memory,
                                 )
                             modules_processed.append(ara)
                     modules_processed.append(child_module)

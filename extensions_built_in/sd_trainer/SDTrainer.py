@@ -1,5 +1,6 @@
 import os
 import random
+import time
 from collections import OrderedDict
 from typing import Union, Literal, List, Optional
 
@@ -48,7 +49,45 @@ adapter_transforms = transforms.Compose([
 ])
 
 
+def maybe_empty_cuda_cache_before_backward(enabled, memory_phase):
+    """Optionally release unused CUDA allocator segments before backward.
+
+    Synchronization makes the before/after telemetry truthful and ensures no
+    outstanding forward work still owns a supposedly free cached segment.
+    The helper is deliberately default-off and does not touch live tensors.
+    """
+    if not enabled or not torch.cuda.is_available():
+        return
+    memory_phase("pre_backward_empty_cache_before")
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    memory_phase("pre_backward_empty_cache_after")
+
+
 class SDTrainer(BaseSDTrainProcess):
+
+    def _memory_phase(self, label: str) -> None:
+        """Emit exact forward/backward phase telemetry only for memory probes."""
+        if os.environ.get("AI_TOOLKIT_MEMORY_PHASE_LOG") != "1":
+            return
+        mem_available_kib = -1
+        try:
+            with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("MemAvailable:"):
+                        mem_available_kib = int(line.split()[1])
+                        break
+        except (OSError, ValueError, IndexError):
+            pass
+        allocated = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
+        reserved = torch.cuda.memory_reserved() if torch.cuda.is_available() else 0
+        print(
+            "AI_TOOLKIT_MEMORY_PHASE "
+            f"epoch_s={time.time():.6f} label={label} "
+            f"mem_available_kib={mem_available_kib} "
+            f"cuda_allocated={allocated} cuda_reserved={reserved}",
+            flush=True,
+        )
 
     def __init__(self, process_id: int, job, config: OrderedDict, **kwargs):
         super().__init__(process_id, job, config, **kwargs)
@@ -2138,6 +2177,7 @@ class SDTrainer(BaseSDTrainProcess):
                             next_sample_noise = (stepped_latents - (1.0 - t_01) * original_samples) / t_01
                             noise = next_sample_noise
                             timesteps = stepped_timesteps
+                self._memory_phase("loss_forward_start")
                 # do a prior pred if we have an unconditional image, we will swap out the giadance later
                 if batch.unconditional_latents is not None or self.do_guided_loss:
                     # do guided loss
@@ -2239,6 +2279,7 @@ class SDTrainer(BaseSDTrainProcess):
 
                         loss = loss + preservation_loss
 
+                self._memory_phase("loss_forward_end")
                 # check if nan
                 if not torch.isfinite(loss):
                     print_acc("loss is nan")
@@ -2256,7 +2297,13 @@ class SDTrainer(BaseSDTrainProcess):
                     # if self.is_bfloat:
                     # loss.backward()
                     # else:
+                    maybe_empty_cuda_cache_before_backward(
+                        self.train_config.empty_cuda_cache_before_backward,
+                        self._memory_phase,
+                    )
+                    self._memory_phase("backward_start")
                     self.accelerator.backward(loss)
+                    self._memory_phase("backward_end")
 
         return loss.detach()
         # flush()
