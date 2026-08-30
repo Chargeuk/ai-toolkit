@@ -107,6 +107,7 @@ export interface SaveConfig {
 
 export interface DatasetConfig {
   batch_size?: number;
+  sampling_weight?: number;
   folder_path: string;
   mask_path: string | null;
   mask_min_value: number;
@@ -155,6 +156,7 @@ export interface ValidationConfig {
 
 export interface TrainConfig {
   batch_size: number;
+  dataset_sampling_strategy?: 'combined' | 'round_robin' | 'weighted_round_robin';
   bypass_guidance_embedding?: boolean;
   steps: number;
   gradient_accumulation: number;
@@ -325,7 +327,7 @@ export interface CaptionProcessConfig {
     batch_size?: number;
     layer_offloading?: boolean;
     layer_offloading_percent?: number;
-  }
+  };
 }
 
 export interface CaptionConfigObject {

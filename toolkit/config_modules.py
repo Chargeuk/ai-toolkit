@@ -2,6 +2,7 @@ import os
 import time
 from typing import List, Optional, Literal, Tuple, Union, TYPE_CHECKING, Dict
 import random
+import math
 
 import torch
 import torchaudio
@@ -391,6 +392,13 @@ class TrainConfig:
         self.min_denoising_steps: int = kwargs.get('min_denoising_steps', 0)
         self.max_denoising_steps: int = kwargs.get('max_denoising_steps', 999)
         self.batch_size: int = kwargs.get('batch_size', 1)
+        self.dataset_sampling_strategy: str = kwargs.get('dataset_sampling_strategy', 'combined')
+        valid_dataset_sampling_strategies = ['combined', 'shuffle', 'concat', 'round_robin', 'weighted_round_robin']
+        if self.dataset_sampling_strategy not in valid_dataset_sampling_strategies:
+            raise ValueError(
+                f"dataset_sampling_strategy must be one of {valid_dataset_sampling_strategies}, "
+                f"got {self.dataset_sampling_strategy}"
+            )
         self.orig_batch_size: int = self.batch_size
         self.dtype: str = kwargs.get('dtype', 'fp32')
         self.xformers = kwargs.get('xformers', False)
@@ -948,6 +956,16 @@ class DatasetConfig:
 
     def __init__(self, **kwargs):
         self.batch_size: Union[int, None] = kwargs.get('batch_size', None)
+        raw_sampling_weight = kwargs.get('sampling_weight', 1)
+        if isinstance(raw_sampling_weight, bool):
+            raise ValueError("sampling_weight must be a positive integer, not a boolean")
+        try:
+            numeric_sampling_weight = float(raw_sampling_weight)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"sampling_weight must be a positive integer, got {raw_sampling_weight!r}") from exc
+        if not math.isfinite(numeric_sampling_weight) or numeric_sampling_weight <= 0 or not numeric_sampling_weight.is_integer():
+            raise ValueError(f"sampling_weight must be a positive integer, got {raw_sampling_weight!r}")
+        self.sampling_weight: int = int(numeric_sampling_weight)
         self.type = kwargs.get('type', 'image')  # sd, slider, reference
         # will be legacy
         self.folder_path: str = kwargs.get('folder_path', None)

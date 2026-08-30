@@ -5,6 +5,7 @@ import { JobConfig, SampleConfig, DatasetConfig, SliderConfig } from '@/types';
 
 export const defaultDatasetConfig: DatasetConfig = {
   folder_path: '/path/to/images/folder',
+  sampling_weight: 1,
   mask_path: null,
   mask_min_value: 0.1,
   default_caption: '',
@@ -69,6 +70,7 @@ export const defaultJobConfig: JobConfig = {
         datasets: [defaultDatasetConfig],
         train: {
           batch_size: 1,
+          dataset_sampling_strategy: 'combined',
           bypass_guidance_embedding: true,
           steps: 3000,
           gradient_accumulation: 1,

@@ -19,6 +19,7 @@ import albumentations as A
 from toolkit import image_utils
 from toolkit.buckets import get_bucket_for_image_size, BucketResolution
 from toolkit.config_modules import DatasetConfig, preprocess_dataset_raw_config
+from toolkit.dataset_sampling import DatasetRoundRobinSampler, normalize_dataset_sampling_strategy
 from toolkit.dataloader_mixins import CaptionMixin, BucketsMixin, LatentCachingMixin, Augments, CLIPCachingMixin, ControlCachingMixin, TextEmbeddingCachingMixin
 from toolkit.data_transfer_object.data_loader import FileItemDTO, DataLoaderBatchDTO
 from toolkit.print import print_acc
@@ -683,6 +684,7 @@ def get_dataloader_from_datasets(
         dataset_options,
         batch_size=1,
         sd: 'StableDiffusion' = None,
+        dataset_sampling_strategy: str = 'combined',
 ) -> DataLoader:
     if dataset_options is None or len(dataset_options) == 0:
         return None
@@ -717,6 +719,16 @@ def get_dataloader_from_datasets(
             raise ValueError(f"invalid dataset type: {config.type}")
 
     concatenated_dataset = ConcatDataset(datasets)
+    dataset_sampling_strategy = normalize_dataset_sampling_strategy(dataset_sampling_strategy)
+    dataset_sampler = None
+    if dataset_sampling_strategy != 'combined':
+        weights = [1] * len(datasets)
+        if dataset_sampling_strategy == 'weighted_round_robin':
+            weights = [config.sampling_weight for config in dataset_config_list]
+        dataset_sampler = DatasetRoundRobinSampler(
+            dataset_lengths=[len(dataset) for dataset in datasets],
+            weights=weights,
+        )
 
     # todo build scheduler that can get buckets from all datasets that match
     # todo and evenly distribute reg images
@@ -751,7 +763,8 @@ def get_dataloader_from_datasets(
             concatenated_dataset,
             batch_size=None,  # we batch in the datasets for now
             drop_last=False,
-            shuffle=True,
+            shuffle=dataset_sampler is None,
+            sampler=dataset_sampler,
             collate_fn=dto_collation,  # Use the custom collate function
             **dataloader_kwargs
         )
@@ -766,7 +779,8 @@ def get_dataloader_from_datasets(
         data_loader = DataLoader(
             concatenated_dataset,
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=dataset_sampler is None,
+            sampler=dataset_sampler,
             collate_fn=dto_collation,
             **dataloader_kwargs
         )

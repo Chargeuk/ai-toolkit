@@ -201,6 +201,16 @@ export default function SimpleJob({
   const showGPUSelect = !isMac();
 
   const validationConfig = jobConfig.config.process[0].train.validation_config;
+  const datasetSamplingStrategy = jobConfig.config.process[0].train.dataset_sampling_strategy ?? 'combined';
+
+  const getDatasetSamplingShare = (datasetIndex: number) => {
+    if (datasetSamplingStrategy === 'combined') return null;
+    const dataset = jobConfig.config.process[0].datasets[datasetIndex];
+    const group = jobConfig.config.process[0].datasets.filter(item => !!item.is_reg === !!dataset.is_reg);
+    if (datasetSamplingStrategy === 'round_robin') return 100 / group.length;
+    const totalWeight = group.reduce((total, item) => total + (item.sampling_weight ?? 1), 0);
+    return ((dataset.sampling_weight ?? 1) / totalWeight) * 100;
+  };
 
   let numDatasetCols = 4;
   let numSampleTopCols = 4;
@@ -1123,6 +1133,28 @@ export default function SimpleJob({
         <div>
           <Card title="Datasets">
             <>
+              <div className="mb-4 grid grid-cols-1 md:grid-cols-2 gap-4 rounded-lg bg-gray-800 p-4">
+                <SelectInput
+                  label="Dataset Sampling"
+                  value={datasetSamplingStrategy}
+                  onChange={value => setJobConfig(value, 'config.process[0].train.dataset_sampling_strategy')}
+                  options={[
+                    { value: 'combined', label: 'Combined shuffle (default)' },
+                    { value: 'round_robin', label: 'Round robin (equal turns)' },
+                    { value: 'weighted_round_robin', label: 'Weighted round robin' },
+                  ]}
+                />
+                <div className="text-sm text-gray-300 self-end pb-2">
+                  {datasetSamplingStrategy === 'combined' &&
+                    'All items are combined and shuffled, preserving existing AI Toolkit behavior.'}
+                  {datasetSamplingStrategy === 'round_robin' &&
+                    'Datasets take equal, interleaved turns and reshuffle independently when they cycle.'}
+                  {datasetSamplingStrategy === 'weighted_round_robin' &&
+                    'Positive integer weights control interleaved turns. For example, weights 3 and 1 give 75% and 25%.'}
+                  {datasetSamplingStrategy !== 'combined' &&
+                    ' Normal and regularization datasets are scheduled within separate groups.'}
+                </div>
+              </div>
               {jobConfig.config.process[0].datasets.map((dataset, i) => (
                 <div key={i} className="p-4 rounded-lg bg-gray-800 relative">
                   <div className="absolute top-2 right-2 flex gap-1">
@@ -1243,6 +1275,29 @@ export default function SimpleJob({
                         min={1}
                         allowEmpty
                       />
+                      {datasetSamplingStrategy === 'weighted_round_robin' && (
+                        <>
+                          <NumberInput
+                            label="Sampling Weight"
+                            value={dataset.sampling_weight ?? 1}
+                            className="pt-2"
+                            onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].sampling_weight`)}
+                            placeholder="eg. 1"
+                            min={1}
+                            required
+                          />
+                          <div className="pt-1 text-xs text-gray-400">
+                            {getDatasetSamplingShare(i)?.toFixed(1)}% of {dataset.is_reg ? 'regularization' : 'normal'}{' '}
+                            sampling turns
+                          </div>
+                        </>
+                      )}
+                      {datasetSamplingStrategy === 'round_robin' && (
+                        <div className="pt-2 text-xs text-gray-400">
+                          {getDatasetSamplingShare(i)?.toFixed(1)}% of {dataset.is_reg ? 'regularization' : 'normal'}{' '}
+                          sampling turns
+                        </div>
+                      )}
                     </div>
                     <div>
                       <TextInput
