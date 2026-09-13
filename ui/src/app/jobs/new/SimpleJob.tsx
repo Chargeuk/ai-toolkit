@@ -82,6 +82,7 @@ export default function SimpleJob({
 
   const isVideoModel = !!(modelArch?.group === 'video');
   const isAudioModel = !!(modelArch?.group === 'audio');
+  const isMiniMaxH3 = ['minimax_h3', 'minimax_h3_ref2va'].includes(jobConfig.config.process[0].model.arch);
 
   const taggedSampleArr: Record<string, any>[] | null = useMemo(() => {
     if (!modelArch) return null;
@@ -481,6 +482,84 @@ export default function SimpleJob({
                   </div>
                 )}
               </>
+            )}
+          </Card>
+          <Card title="Memory">
+            <FormGroup label="Training Memory">
+              <Checkbox
+                label="Gradient Checkpointing"
+                checked={jobConfig.config.process[0].train.gradient_checkpointing ?? true}
+                onChange={value => setJobConfig(value, 'config.process[0].train.gradient_checkpointing')}
+                docKey="train.gradient_checkpointing"
+              />
+              {!isMac() && (
+                <Checkbox
+                  label="Empty CUDA Cache Before Backward"
+                  checked={jobConfig.config.process[0].train.empty_cuda_cache_before_backward ?? false}
+                  onChange={value => setJobConfig(value, 'config.process[0].train.empty_cuda_cache_before_backward')}
+                  docKey="train.empty_cuda_cache_before_backward"
+                />
+              )}
+            </FormGroup>
+            {modelArch?.additionalSections?.includes('model.layer_offloading') && !isMac() && (
+              <FormGroup label="Layer Offloading Memory" className="pt-2">
+                <Checkbox
+                  label="Pin Offloaded Layer Memory"
+                  checked={jobConfig.config.process[0].model.layer_offloading_pin_memory ?? true}
+                  onChange={value => setJobConfig(value, 'config.process[0].model.layer_offloading_pin_memory')}
+                  docKey="model.layer_offloading_pin_memory"
+                />
+              </FormGroup>
+            )}
+            {isMiniMaxH3 && !isMac() && (
+              <FormGroup label="MiniMax H3 Memory" className="pt-2">
+                <NumberInput
+                  label="Activation Checkpoint Group Size"
+                  value={jobConfig.config.process[0].model.activation_checkpoint_group_size ?? 1}
+                  onChange={value =>
+                    setJobConfig(value ?? 1, 'config.process[0].model.activation_checkpoint_group_size')
+                  }
+                  min={1}
+                  max={200}
+                  required
+                  docKey="model.activation_checkpoint_group_size"
+                />
+                <Checkbox
+                  label="Save Checkpoint Activations on CPU"
+                  checked={jobConfig.config.process[0].model.activation_checkpoint_save_on_cpu ?? false}
+                  onChange={value => setJobConfig(value, 'config.process[0].model.activation_checkpoint_save_on_cpu')}
+                  docKey="model.activation_checkpoint_save_on_cpu"
+                />
+                <Checkbox
+                  label="Save ConvRot Backward Tensors on CPU"
+                  checked={jobConfig.config.process[0].model.convrot_backward_save_on_cpu ?? false}
+                  onChange={value => setJobConfig(value, 'config.process[0].model.convrot_backward_save_on_cpu')}
+                  docKey="model.convrot_backward_save_on_cpu"
+                />
+                <NumberInput
+                  label="Expected ConvRot Offloaded Layers"
+                  value={jobConfig.config.process[0].model.convrot_backward_save_expected_layers ?? 0}
+                  onChange={value =>
+                    setJobConfig(value ?? 0, 'config.process[0].model.convrot_backward_save_expected_layers')
+                  }
+                  min={0}
+                  max={10000}
+                  required
+                  docKey="model.convrot_backward_save_expected_layers"
+                />
+                {jobConfig.config.process[0].model.convrot_backward_save_on_cpu &&
+                  (!jobConfig.config.process[0].model.layer_offloading ||
+                    (jobConfig.config.process[0].model.layer_offloading_transformer_percent ?? 1) !== 1 ||
+                    !jobConfig.config.process[0].model.quantize ||
+                    jobConfig.config.process[0].model.qtype !== 'convrot8' ||
+                    (jobConfig.config.process[0].model.convrot_backward_save_expected_layers ?? 0) <= 0) && (
+                    <p className="pt-2 text-xs text-yellow-400">
+                      CPU ConvRot backward saving requires ConvRot8, layer offloading, 100% transformer offload, and the
+                      exact positive number of eligible offloaded layers. The trainer rejects a mismatch rather than
+                      silently using an unsafe configuration.
+                    </p>
+                  )}
+              </FormGroup>
             )}
           </Card>
           {disableSections.includes('model.quantize') ? null : (
@@ -1360,6 +1439,12 @@ export default function SimpleJob({
                           onChange={value =>
                             setJobConfig(value, `config.process[0].datasets[${i}].cache_latents_to_disk`)
                           }
+                        />
+                        <Checkbox
+                          label="Pin Dataset Memory"
+                          checked={dataset.pin_memory ?? false}
+                          onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].pin_memory`)}
+                          docKey="datasets.pin_memory"
                         />
                         <Checkbox
                           label="Is Regularization"

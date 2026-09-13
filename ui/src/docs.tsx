@@ -183,6 +183,88 @@ const docs: { [key: string]: ConfigDoc } = {
       </>
     ),
   },
+  'datasets.pin_memory': {
+    title: 'Pin Dataset Memory',
+    description: (
+      <>
+        Places DataLoader tensors in page-locked system memory, which can make CPU-to-GPU transfers faster. It also
+        prevents that RAM from being relocated, so it can increase memory pressure or PCIe thrashing when GPU memory is
+        already at its limit. This is off by default; enable it only when the machine has stable VRAM and system-RAM
+        headroom.
+      </>
+    ),
+  },
+  'train.gradient_checkpointing': {
+    title: 'Gradient Checkpointing',
+    description: (
+      <>
+        Saves GPU memory by storing fewer intermediate activations during the forward pass and recalculating them during
+        backward. This usually permits larger models or resolutions, at the cost of some training speed. The established
+        default is enabled.
+      </>
+    ),
+  },
+  'train.empty_cuda_cache_before_backward': {
+    title: 'Empty CUDA Cache Before Backward',
+    description: (
+      <>
+        Releases unused blocks held by PyTorch&apos;s CUDA allocator immediately before backward. Live tensors are not
+        removed. It can avoid a memory spike on constrained or unified-memory systems, but forces synchronization and
+        may slow training, so it is off by default.
+      </>
+    ),
+  },
+  'model.layer_offloading_pin_memory': {
+    title: 'Pin Offloaded Layer Memory',
+    description: (
+      <>
+        Keeps offloaded model weights in page-locked system memory for faster asynchronous transfers back to the GPU.
+        Disable it when host-registration or unified-memory pressure is causing failures or severe thrashing. The
+        historical behavior is enabled.
+      </>
+    ),
+  },
+  'model.activation_checkpoint_group_size': {
+    title: 'Activation Checkpoint Group Size',
+    description: (
+      <>
+        MiniMax H3 can checkpoint several consecutive transformer blocks as one group. A value of 1 keeps the
+        established per-block behavior. Larger values save fewer group-boundary activations and can reduce peak memory,
+        but change recomputation cost and should be tested for the exact model and workload.
+      </>
+    ),
+  },
+  'model.activation_checkpoint_save_on_cpu': {
+    title: 'Save Checkpoint Activations on CPU',
+    description: (
+      <>
+        Stores tensors retained for MiniMax H3 gradient-checkpoint recomputation in pageable CPU memory instead of GPU
+        memory. This can materially reduce peak GPU usage, but transfers during backward can make each step slower. It
+        only has an effect when gradient checkpointing is enabled and is off by default.
+      </>
+    ),
+  },
+  'model.convrot_backward_save_on_cpu': {
+    title: 'Save ConvRot Backward Tensors on CPU',
+    description: (
+      <>
+        Stores the canonical ConvRot quantized weights and scales needed by backward in pageable CPU memory, staging
+        only the current layer on the GPU. This is a strict opt-in for MiniMax H3 ConvRot8 training. It requires layer
+        offloading, 100% transformer offload, and an exact positive eligible-layer count; the trainer stops on a
+        mismatch instead of silently using an unsafe configuration.
+      </>
+    ),
+  },
+  'model.convrot_backward_save_expected_layers': {
+    title: 'Expected ConvRot Offloaded Layers',
+    description: (
+      <>
+        The exact number of eligible ConvRot transformer layers expected when CPU backward saving is enabled. This is a
+        fail-closed safety binding: zero or a mismatch is rejected. Leave it at 0 while CPU ConvRot backward saving is
+        disabled, and set it only from a validated model-specific count.
+      </>
+    ),
+  },
   'model.multistage': {
     title: 'Stages to Train',
     description: (
@@ -353,20 +435,16 @@ const docs: { [key: string]: ConfigDoc } = {
     title: 'KV Cache',
     description: (
       <>
-        This will enable KV Cache for control images in a model that supports it. LoRAs trained with this on
-        need to also be inferenced with it, and vice versa. This does not speed up or slow down training, but on inference,
-        the control images only need to be processed once for the entire generation, vs being processed for every step.
+        This will enable KV Cache for control images in a model that supports it. LoRAs trained with this on need to
+        also be inferenced with it, and vice versa. This does not speed up or slow down training, but on inference, the
+        control images only need to be processed once for the entire generation, vs being processed for every step.
         Which leads to a significant speedup on inference.
       </>
     ),
   },
   'train.guidance_loss_target': {
     title: 'Guidance Loss Target',
-    description: (
-      <>
-        For contrastive guidance loss, this is the target CGF to amplify predictions to. 
-      </>
-    ),
+    description: <>For contrastive guidance loss, this is the target CGF to amplify predictions to.</>,
   },
   'datasets.caption_dropout_rate': {
     title: 'Caption Dropout Rate',
@@ -374,15 +452,15 @@ const docs: { [key: string]: ConfigDoc } = {
       <>
         Caption dropout rate is the probability that the caption for an image will be dropped (replaced with a blank
         caption) for any given training step. For example, a value of 0.05 will drop the caption around 5% of the time.
-        Dropping captions helps the model learn the concept being trained without relying entirely on the caption,
-        and helps preserve the model&apos;s ability to generate without a prompt. If a trigger word is set, the trigger
-        word is still used when the caption is dropped, so the model still associates the dropped samples with your
-        trigger word. Regularization images, or images without a trigger word, drop to a fully blank caption.
+        Dropping captions helps the model learn the concept being trained without relying entirely on the caption, and
+        helps preserve the model&apos;s ability to generate without a prompt. If a trigger word is set, the trigger word
+        is still used when the caption is dropped, so the model still associates the dropped samples with your trigger
+        word. Regularization images, or images without a trigger word, drop to a fully blank caption.
         <br />
         <br />
-        Caption dropout also works when caching text embeddings. An additional embedding for the dropout caption
-        (blank, or the trigger word alone) is cached to disk alongside the normal one, and it is randomly swapped in
-        at train time at this rate.
+        Caption dropout also works when caching text embeddings. An additional embedding for the dropout caption (blank,
+        or the trigger word alone) is cached to disk alongside the normal one, and it is randomly swapped in at train
+        time at this rate.
       </>
     ),
   },

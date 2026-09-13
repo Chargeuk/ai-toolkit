@@ -108,6 +108,7 @@ export interface SaveConfig {
 export interface DatasetConfig {
   batch_size?: number;
   sampling_weight?: number;
+  pin_memory?: boolean;
   folder_path: string;
   mask_path: string | null;
   mask_min_value: number;
@@ -163,6 +164,7 @@ export interface TrainConfig {
   train_unet: boolean;
   train_text_encoder: boolean;
   gradient_checkpointing: boolean;
+  empty_cuda_cache_before_backward?: boolean;
   noise_scheduler: string;
   timestep_type: string;
   content_or_style: string;
@@ -212,6 +214,11 @@ export interface ModelConfig {
   layer_offloading?: boolean;
   layer_offloading_transformer_percent?: number;
   layer_offloading_text_encoder_percent?: number;
+  layer_offloading_pin_memory?: boolean;
+  convrot_backward_save_on_cpu?: boolean;
+  convrot_backward_save_expected_layers?: number;
+  activation_checkpoint_group_size?: number;
+  activation_checkpoint_save_on_cpu?: boolean;
   assistant_lora_path?: string;
   unconditional_lora_path?: string;
   compile?: boolean;
