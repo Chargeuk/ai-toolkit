@@ -8,6 +8,7 @@ import torch
 import torchaudio
 
 from toolkit.audio.album_artwork import add_album_artwork
+from toolkit.memory_management.thresholds import MemoryThresholds
 from toolkit.prompt_utils import PromptEmbeds
 from torchao.quantization.quant_primitives import _DTYPE_TO_BIT_WIDTH
 
@@ -419,6 +420,7 @@ class TrainConfig:
         self.skip_first_sample = kwargs.get('skip_first_sample', False)
         self.force_first_sample = kwargs.get('force_first_sample', False)
         self.gradient_checkpointing = kwargs.get('gradient_checkpointing', True)
+        self.memory_thresholds = MemoryThresholds.from_config(kwargs.get('memory_thresholds'))
         self.weight_jitter = kwargs.get('weight_jitter', 0.0)
         self.merge_network_on_save = kwargs.get('merge_network_on_save', False)
         self.merge_network_on_save_strength = kwargs.get('merge_network_on_save_strength', 1.0)

@@ -23,6 +23,7 @@ from toolkit.image_utils import show_tensors, show_latents
 from toolkit.ip_adapter import IPAdapter
 from toolkit.custom_adapter import CustomAdapter
 from toolkit.memory_management import sync_grad_transfers
+from toolkit.memory_management.thresholds import begin_memory_microbatch, cache_clear_for_microbatch
 from toolkit.print import print_acc
 from toolkit.prompt_utils import PromptEmbeds, concat_prompt_embeds
 from toolkit.reference_adapter import ReferenceAdapter
@@ -1461,6 +1462,13 @@ class SDTrainer(BaseSDTrainProcess):
         # accum_scale: 1 / number of micro-batches accumulated per optimizer step, so the
         # summed gradients equal the mean over the effective batch. Applied to the backward
         # only; the returned loss stays unscaled for logging.
+        memory_thresholds = self.train_config.memory_thresholds
+        memory_policy_model = None
+        if memory_thresholds.active:
+            memory_policy_model = begin_memory_microbatch(
+                self.sd.unet_unwrapped, memory_thresholds, self.model_config.arch,
+                compiled=self.model_config.compile,
+            )
         with torch.no_grad():
             self.timer.start('preprocess_batch')
             if isinstance(self.adapter, CustomAdapter):
@@ -2332,10 +2340,17 @@ class SDTrainer(BaseSDTrainProcess):
                     # if self.is_bfloat:
                     # loss.backward()
                     # else:
-                    maybe_empty_cuda_cache_before_backward(
+                    clear_cache = cache_clear_for_microbatch(
                         self.train_config.empty_cuda_cache_before_backward,
-                        self._memory_phase,
+                        memory_thresholds, memory_policy_model,
                     )
+                    if memory_thresholds.active:
+                        print_acc(
+                            f"MEMORY_THRESHOLDS backward peak_tokens="
+                            f"{memory_policy_model.memory_threshold_peak_tokens} "
+                            f"empty_cuda_cache={clear_cache}"
+                        )
+                    maybe_empty_cuda_cache_before_backward(clear_cache, self._memory_phase)
                     self._memory_phase("backward_start")
                     scaled_loss = loss * accum_scale if accum_scale != 1.0 else loss
                     self.accelerator.backward(scaled_loss)

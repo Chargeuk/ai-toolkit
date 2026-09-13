@@ -10,7 +10,7 @@ import {
   SampleTags,
 } from './options';
 import { defaultCompileOptions, defaultDatasetConfig } from './jobConfig';
-import { GroupedSelectOption, JobConfig, SelectOption } from '@/types';
+import { GroupedSelectOption, JobConfig, SelectOption, MemoryThresholdConfig } from '@/types';
 import { objectCopy, tagsToObj, objToTags } from '@/utils/basic';
 import {
   TextInput,
@@ -48,6 +48,34 @@ type Props = {
 };
 
 const isDev = process.env.NODE_ENV === 'development';
+
+function MemoryThresholdInput({
+  field,
+  label,
+  jobConfig,
+  setJobConfig,
+  enabled,
+}: {
+  field: keyof MemoryThresholdConfig;
+  label: string;
+  jobConfig: JobConfig;
+  setJobConfig: (value: any, key: string) => void;
+  enabled: boolean;
+}) {
+  return (
+    <fieldset disabled={!enabled} className={!enabled ? 'opacity-50' : ''}>
+      <NumberInput
+        label={label}
+        value={jobConfig.config.process[0].train.memory_thresholds?.[field] ?? 0}
+        onChange={value =>
+          setJobConfig(Math.max(0, Math.round(value ?? 0)), `config.process[0].train.memory_thresholds.${field}`)
+        }
+        min={0}
+        docKey="train.memory_thresholds"
+      />
+    </fieldset>
+  );
+}
 
 export default function SimpleJob({
   jobConfig,
@@ -485,6 +513,13 @@ export default function SimpleJob({
             )}
           </Card>
           <Card title="Memory">
+            {isMiniMaxH3 && (
+              <p className="text-xs text-gray-400">
+                Minimum tokens: 0 applies an enabled option to every batch. A positive value applies it when the packed
+                input reaches that count, including references, latent frames, text and batch size. This is a workload
+                measure, not gigabytes. Decisions are logged per forward/backward. Changes apply on the next job start.
+              </p>
+            )}
             <FormGroup label="Training Memory">
               <Checkbox
                 label="Gradient Checkpointing"
@@ -492,12 +527,30 @@ export default function SimpleJob({
                 onChange={value => setJobConfig(value, 'config.process[0].train.gradient_checkpointing')}
                 docKey="train.gradient_checkpointing"
               />
+              {isMiniMaxH3 && (
+                <MemoryThresholdInput
+                  field="gradient_checkpointing_min_tokens"
+                  label="Checkpointing minimum tokens (0 = always)"
+                  jobConfig={jobConfig}
+                  setJobConfig={setJobConfig}
+                  enabled={jobConfig.config.process[0].train.gradient_checkpointing ?? true}
+                />
+              )}
               {!isMac() && (
                 <Checkbox
                   label="Empty CUDA Cache Before Backward"
                   checked={jobConfig.config.process[0].train.empty_cuda_cache_before_backward ?? false}
                   onChange={value => setJobConfig(value, 'config.process[0].train.empty_cuda_cache_before_backward')}
                   docKey="train.empty_cuda_cache_before_backward"
+                />
+              )}
+              {isMiniMaxH3 && !isMac() && (
+                <MemoryThresholdInput
+                  field="empty_cuda_cache_before_backward_min_tokens"
+                  label="Cache clearing minimum tokens (0 = always)"
+                  jobConfig={jobConfig}
+                  setJobConfig={setJobConfig}
+                  enabled={jobConfig.config.process[0].train.empty_cuda_cache_before_backward ?? false}
                 />
               )}
             </FormGroup>
@@ -524,11 +577,31 @@ export default function SimpleJob({
                   required
                   docKey="model.activation_checkpoint_group_size"
                 />
+                <MemoryThresholdInput
+                  field="activation_checkpoint_group_size_min_tokens"
+                  label="Grouped checkpointing minimum tokens (0 = always)"
+                  jobConfig={jobConfig}
+                  setJobConfig={setJobConfig}
+                  enabled={
+                    (jobConfig.config.process[0].train.gradient_checkpointing ?? true) &&
+                    (jobConfig.config.process[0].model.activation_checkpoint_group_size ?? 1) > 1
+                  }
+                />
                 <Checkbox
                   label="Save Checkpoint Activations on CPU"
                   checked={jobConfig.config.process[0].model.activation_checkpoint_save_on_cpu ?? false}
                   onChange={value => setJobConfig(value, 'config.process[0].model.activation_checkpoint_save_on_cpu')}
                   docKey="model.activation_checkpoint_save_on_cpu"
+                />
+                <MemoryThresholdInput
+                  field="activation_checkpoint_save_on_cpu_min_tokens"
+                  label="CPU activations minimum tokens (0 = always)"
+                  jobConfig={jobConfig}
+                  setJobConfig={setJobConfig}
+                  enabled={
+                    (jobConfig.config.process[0].train.gradient_checkpointing ?? true) &&
+                    (jobConfig.config.process[0].model.activation_checkpoint_save_on_cpu ?? false)
+                  }
                 />
                 <Checkbox
                   label="Save ConvRot Backward Tensors on CPU"

@@ -34,6 +34,7 @@ from contextlib import nullcontext
 from typing import Optional, Tuple
 
 from toolkit.models.v2._mixin import OstrisModelMixin
+from toolkit.memory_management.thresholds import MemoryThresholds, checkpoint_profile
 
 import torch
 import torch.nn.functional as F
@@ -312,9 +313,11 @@ class MiniMaxH3TokenRefiner(nn.Module):
         self.final_norm = nn.RMSNorm(p.hidden_size, eps=p.final_norm_eps)
         self.gradient_checkpointing = False
 
-    def forward(self, x: torch.Tensor, attn_mask=None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, attn_mask=None, gradient_checkpointing=None) -> torch.Tensor:
+        # Capture the decision for this graph; never mutate shared module state.
+        use_checkpointing = self.gradient_checkpointing if gradient_checkpointing is None else gradient_checkpointing
         for block in self.blocks:
-            if torch.is_grad_enabled() and self.gradient_checkpointing:
+            if torch.is_grad_enabled() and use_checkpointing:
                 x = checkpoint(block, x, attn_mask, use_reentrant=False)
             else:
                 x = block(x, attn_mask)
@@ -474,6 +477,8 @@ class MiniMaxH3Transformer(nn.Module, OstrisModelMixin):
         self.gradient_checkpointing = False
         self.activation_checkpoint_group_size = 1
         self.activation_checkpoint_save_on_cpu = False
+        self.memory_thresholds = MemoryThresholds()
+        self.memory_threshold_peak_tokens = None
         # None = dense attention. Set by the FastH3 model wrapper; only takes
         # effect on gate_compress checkpoints when the caller passes the grid.
         self.vsa_sparsity: Optional[float] = None
@@ -561,6 +566,24 @@ class MiniMaxH3Transformer(nn.Module, OstrisModelMixin):
         Conditioning rows come back unmasked; discarding them is the caller's
         job."""
         batch_size, seq_len = token_tags.shape
+        # Use the actual padded pack, including every reference, text/audio row,
+        # latent frame and batch item. Shape inspection introduces no CUDA sync.
+        packed_tokens = batch_size * seq_len
+        profile = checkpoint_profile(
+            self.memory_thresholds, packed_tokens, self.gradient_checkpointing,
+            self.activation_checkpoint_save_on_cpu, self.activation_checkpoint_group_size,
+        )
+        if self.memory_thresholds.active and torch.is_grad_enabled():
+            self.memory_threshold_peak_tokens = max(
+                self.memory_threshold_peak_tokens or 0, packed_tokens
+            )
+            print(
+                f"MEMORY_THRESHOLDS forward packed_tokens={packed_tokens} "
+                f"batch={batch_size} sequence={seq_len} "
+                f"gradient_checkpointing={profile.gradient_checkpointing} "
+                f"save_on_cpu={profile.save_on_cpu} group_size={profile.group_size}",
+                flush=True,
+            )
 
         rotary_emb = self.rope(position_ids)
 
@@ -582,7 +605,10 @@ class MiniMaxH3Transformer(nn.Module, OstrisModelMixin):
             attn_mask = live[:, None, None, :]
             text_attn_mask = live[:, text_indices][:, None, None, :]
 
-        text_embeds = self.token_refiner(text_embeds, text_attn_mask)
+        text_embeds = self.token_refiner(
+            text_embeds, text_attn_mask,
+            gradient_checkpointing=profile.gradient_checkpointing,
+        )
 
         x = text_embeds.new_zeros((batch_size, seq_len, text_embeds.shape[-1]))
         x = x.index_copy(1, text_indices, text_embeds)
@@ -618,17 +644,17 @@ class MiniMaxH3Transformer(nn.Module, OstrisModelMixin):
                 )
             )
 
-        group_size = self.activation_checkpoint_group_size
-        if torch.is_grad_enabled() and self.gradient_checkpointing and group_size > 1:
+        group_size = profile.group_size
+        if torch.is_grad_enabled() and profile.gradient_checkpointing and group_size > 1:
             for start in range(0, len(self.blocks), group_size):
                 end = min(start + group_size, len(self.blocks))
                 saved_tensor_context = (
                     torch.autograd.graph.save_on_cpu(pin_memory=False)
-                    if self.activation_checkpoint_save_on_cpu
+                    if profile.save_on_cpu
                     else nullcontext()
                 )
                 with saved_tensor_context:
-                    if self.activation_checkpoint_save_on_cpu:
+                    if profile.save_on_cpu:
                         # Only the changing block boundary belongs in the
                         # checkpoint input set.  The other tensors are shared
                         # invariants for every group; explicitly passing them
@@ -671,14 +697,14 @@ class MiniMaxH3Transformer(nn.Module, OstrisModelMixin):
                         )
         else:
             for block in self.blocks:
-                if torch.is_grad_enabled() and self.gradient_checkpointing:
+                if torch.is_grad_enabled() and profile.gradient_checkpointing:
                     saved_tensor_context = (
                         torch.autograd.graph.save_on_cpu(pin_memory=False)
-                        if self.activation_checkpoint_save_on_cpu
+                        if profile.save_on_cpu
                         else nullcontext()
                     )
                     with saved_tensor_context:
-                        if self.activation_checkpoint_save_on_cpu:
+                        if profile.save_on_cpu:
                             x = checkpoint(
                                 lambda block_x, block=block: block(
                                     block_x,

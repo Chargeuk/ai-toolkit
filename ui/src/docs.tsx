@@ -194,6 +194,33 @@ const docs: { [key: string]: ConfigDoc } = {
       </>
     ),
   },
+  'train.memory_thresholds': {
+    title: 'Minimum workload for memory saving',
+    description: (
+      <>
+        MiniMax H3 / Ref2VA only, with model compilation disabled. Each minimum is an independent non-negative integer
+        count of packed tokens across the batch. The count includes target and reference latent rows, text, audio and
+        padding. More pixels or latent frames increase this count; references matter too. It is a workload proxy, not a
+        prediction of GPU memory in GB, and cannot guarantee that a batch will fit.
+        <br />
+        <br />
+        Zero preserves the existing behavior. An enabled option applies at or above its minimum. Turning its main switch
+        off always disables it. Below the group-size minimum, checkpoint groups use one block. CPU activation saving and
+        grouped checkpointing have no effect when gradient checkpointing is off.
+        <br />
+        <br />
+        Start conservatively and use MEMORY_THRESHOLDS log entries to calibrate values for the actual model and inputs.
+        For example, at 12000 tokens a minimum of 10000 enables the option; a minimum of 16000 leaves it off. Cache
+        clearing uses the largest differentiable forward in that microbatch, so a later smaller or no-gradient reference
+        pass cannot turn it off accidentally. A decision is retained for its own backward graph. Missing observations
+        retain enabled cache clearing.
+        <br />
+        <br />
+        These controls do not move model layers or change pinned buffers. They take effect on the next job start;
+        editing a job does not change a training process that is already running.
+      </>
+    ),
+  },
   'train.gradient_checkpointing': {
     title: 'Gradient Checkpointing',
     description: (

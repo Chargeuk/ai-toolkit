@@ -155,7 +155,15 @@ export interface ValidationConfig {
   validation_sigmas?: number[];
 }
 
+export interface MemoryThresholdConfig {
+  gradient_checkpointing_min_tokens?: number;
+  activation_checkpoint_save_on_cpu_min_tokens?: number;
+  activation_checkpoint_group_size_min_tokens?: number;
+  empty_cuda_cache_before_backward_min_tokens?: number;
+}
+
 export interface TrainConfig {
+  memory_thresholds?: MemoryThresholdConfig;
   batch_size: number;
   dataset_sampling_strategy?: 'combined' | 'round_robin' | 'weighted_round_robin';
   bypass_guidance_embedding?: boolean;
