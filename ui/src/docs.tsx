@@ -168,9 +168,18 @@ const docs: { [key: string]: ConfigDoc } = {
       <>
         <small>(experimental)</small>
         <br />
-        Caching text embeddings will process and cache all the text embeddings from the text encoder to the disk. The
-        text encoder will be unloaded from the GPU. This does not work with things that dynamically change the prompt
-        such as trigger words, caption dropout, etc.
+        Caching text embeddings will process and cache all text-encoder outputs to disk, then unload the text encoder
+        from the GPU.
+      </>
+    ),
+  },
+  'train.cache_text_embeddings_content_addressed': {
+    title: 'Deduplicate Cached Embeddings',
+    description: (
+      <>
+        Stores each unique full conditioning result once. Items with the same prompt and the same reference media reuse
+        one file. Items with different reference images or videos remain separate because their embeddings are
+        different. Existing jobs and cache paths are unchanged unless this option is enabled.
       </>
     ),
   },

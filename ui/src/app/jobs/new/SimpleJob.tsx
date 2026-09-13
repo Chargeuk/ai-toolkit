@@ -839,8 +839,19 @@ export default function SimpleJob({
                       setJobConfig(value, 'config.process[0].train.cache_text_embeddings');
                       if (value) {
                         setJobConfig(false, 'config.process[0].train.unload_text_encoder');
+                      } else {
+                        setJobConfig(false, 'config.process[0].train.cache_text_embeddings_content_addressed');
                       }
                     }}
+                  />
+                  <Checkbox
+                    label="Deduplicate Cached Embeddings"
+                    checked={jobConfig.config.process[0].train.cache_text_embeddings_content_addressed || false}
+                    disabled={!jobConfig.config.process[0].train.cache_text_embeddings}
+                    docKey={'train.cache_text_embeddings_content_addressed'}
+                    onChange={value =>
+                      setJobConfig(value, 'config.process[0].train.cache_text_embeddings_content_addressed')
+                    }
                   />
                 </FormGroup>
               </div>

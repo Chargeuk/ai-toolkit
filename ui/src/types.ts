@@ -172,6 +172,7 @@ export interface TrainConfig {
   dtype: string;
   unload_text_encoder: boolean;
   cache_text_embeddings: boolean;
+  cache_text_embeddings_content_addressed?: boolean;
   optimizer_params: {
     weight_decay: number;
   };

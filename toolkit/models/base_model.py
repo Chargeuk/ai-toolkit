@@ -98,6 +98,9 @@ UNET_IN_CHANNELS = 4  # Stable Diffusion の in_channels は 4 で固定。XLも
 class BaseModel:
     # override these in child classes
     arch = None
+    # rename LoRA keys transformer. <-> diffusion_model. (the ComfyUI-standard
+    # prefix) on save/load
+    lora_keys_use_comfy_prefix = False
 
     def __init__(
             self,
@@ -164,6 +167,9 @@ class BaseModel:
         self.invert_assistant_lora = False
         self._after_sample_img_hooks = []
         self._status_update_hooks = []
+        # inference engine: called as hook(step_index, num_steps, latents)
+        # after every scheduler step while generating samples
+        self.sample_step_hook = None
         self.is_transformer = False
 
         self.sample_prompts_cache = None
@@ -182,6 +188,8 @@ class BaseModel:
         self.supports_video_control_images = False
         # D-OPSD: cache per-item teacher text embeds (item's own media as reference 1)
         self.dopsd_self_ref = False
+        # weight of the normal-target loss added alongside the D-OPSD teacher loss
+        self.dopsd_bleed_strength = 1.0
         # forces cache_tensors_to_disk on latent-caching datasets (BaseSDTrainProcess)
         self.require_pixel_tensor_cache = False
         # control images will come in as a list for encoding some things if true
@@ -396,6 +404,18 @@ class BaseModel:
     def add_status_update_hook(self, func):
         self._status_update_hooks.append(func)
 
+    def _emit_sample_step(self, latents, step_index=None, num_steps=None):
+        """For holders whose sampling loop bypasses scheduler.step: report one
+        denoised latent to sample_step_hook (no-op when unset)."""
+        from toolkit.sample_step_hook import emit_sample_step
+
+        emit_sample_step(self, latents, step_index, num_steps)
+
+    def _install_sample_step_hooks(self, pipeline):
+        from toolkit.sample_step_hook import install_sample_step_hooks
+
+        return install_sample_step_hooks(self, pipeline)
+
     @torch.no_grad()
     def generate_images(
             self,
@@ -451,6 +471,8 @@ class BaseModel:
                 pipeline.set_progress_bar_config(disable=True)
             except:
                 pass
+
+        unwrap_step_hooks = self._install_sample_step_hooks(pipeline)
 
         start_multiplier = 1.0
         if network is not None:
@@ -512,6 +534,7 @@ class BaseModel:
 
                     if network is not None:
                         network.multiplier = gen_config.network_multiplier
+                    self._sample_step_index = 0
                     torch.manual_seed(gen_config.seed)
                     torch.cuda.manual_seed(gen_config.seed)
 
@@ -720,6 +743,7 @@ class BaseModel:
                 if self.adapter is not None and isinstance(self.adapter, ReferenceAdapter):
                     self.adapter.clear_memory()
 
+        unwrap_step_hooks()
         # clear pipeline and cache to reduce vram usage
         del pipeline
         torch.cuda.empty_cache()
@@ -1624,13 +1648,66 @@ class BaseModel:
                 encoder.to(*args, **kwargs)
         else:
             self.text_encoder.to(*args, **kwargs)
-    
+
+    def component_load_kwargs(self, role: str = "transformer", dtype=None):
+        """kwargs for a v2 module's .load()/.aitk_post_load(), derived from
+        model_config: qtype (with the accuracy recovery adapter recombined),
+        offload fraction, devices, low_vram placement. Roles: "transformer",
+        "te", "vae"."""
+        mc = self.model_config
+        qtype, offload = None, 0.0
+        if role == "transformer":
+            if mc.quantize:
+                qtype = mc.qtype
+                if mc.accuracy_recovery_adapter and "|" not in (qtype or ""):
+                    qtype = f"{qtype}|{mc.accuracy_recovery_adapter}"
+            if mc.layer_offloading:
+                offload = mc.layer_offloading_transformer_percent
+        elif role == "te":
+            if mc.quantize_te:
+                qtype = mc.qtype_te
+            if mc.layer_offloading:
+                offload = mc.layer_offloading_text_encoder_percent
+        if dtype is None:
+            dtype = self.vae_torch_dtype if role == "vae" else self.torch_dtype
+        device = self.te_device_torch if role == "te" else self.device_torch
+        if mc.low_vram and role in ("transformer", "te"):
+            device = "cpu"
+        elif role == "vae":
+            device = self.vae_device_torch
+        return dict(
+            qtype=qtype,
+            offload=offload,
+            dtype=dtype,
+            device=device,
+            quantize_device=self.device_torch,
+            base_model=self,
+            use_comfy_weights=mc.model_kwargs.get("use_comfy_weights", True),
+            pin_memory=mc.layer_offloading_pin_memory,
+            convrot_backward_save_on_cpu=(
+                mc.convrot_backward_save_on_cpu if role == "transformer" else False
+            ),
+            convrot_backward_save_expected_layers=(
+                mc.convrot_backward_save_expected_layers if role == "transformer" else 0
+            ),
+        )
+
     def convert_lora_weights_before_save(self, state_dict):
         # can be overridden in child classes to convert weights before saving
+        if self.lora_keys_use_comfy_prefix:
+            return {
+                k.replace("transformer.", "diffusion_model."): v
+                for k, v in state_dict.items()
+            }
         return state_dict
-    
+
     def convert_lora_weights_before_load(self, state_dict):
         # can be overridden in child classes to convert weights before loading
+        if self.lora_keys_use_comfy_prefix:
+            return {
+                k.replace("diffusion_model.", "transformer."): v
+                for k, v in state_dict.items()
+            }
         return state_dict
     
     def condition_noisy_latents(self, latents: torch.Tensor, batch:'DataLoaderBatchDTO'):
